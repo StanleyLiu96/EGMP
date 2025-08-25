@@ -1,325 +1,148 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-EGMP_pre-processing.py
-Preprocess MAD-EEG trials for EGMP (EEG + Gains + Mixed audio + Panning).
+EGMP_pre-processing.py  (MAD-EEG-aligned timing)
 
-Inputs (fixed shapes per your note):
-- EEG .npy:  (20, 4864) at 256 Hz
-  /users/PAS2301/liu215229932/Music_Project/Dataset/MADEEG/processed_data/response_npy
-- Mixed .wav: (837900, 2) at 44100 Hz
-  /users/PAS2301/liu215229932/Music_Project/Dataset/MADEEG/processed_data/stimulus_wav
+- Align audio features to EEG at 256 Hz by using STFT:
+    hop_length = round(44100 / 256) = 172 samples
+    win_length = 2 * hop_length = 344 samples
+  Then resample features to exactly 4864 frames (19 s * 256 Hz).
 
-Optional per-trial YAML (if present, same basename with .yml/.yaml) containing:
-  wav_info:
-    gains:   [ ... ]  # strings or floats
-    panning: [ ... ]  # in [0,1], 0=Left, 1=Right
+- No EEG upsampling. EEG stays at 256 Hz. We:
+    * common-average re-reference
+    * optional band-pass 1-32 Hz
+    * per-subject z-score (two-pass)
+    * build lag bank (0..250 ms)
+    * (only if needed) tiny linear time-resample to match audio frames
+
+Inputs:
+  EEG .npy   (20, 4864) @ 256 Hz
+    /users/PAS2301/liu215229932/Music_Project/Dataset/MADEEG/processed_data/response_npy
+  Mixed .wav (837900, 2) @ 44100 Hz
+    /users/PAS2301/liu215229932/Music_Project/Dataset/MADEEG/processed_data/stimulus_wav
+  Master YAML: madeeg_preprocessed.yaml
+    keys: "<subject_id>": { "<trial_key>": { instruments, target, genre, ensemble, spatial,
+                                             wav_info: {gains, panning, sfreq} } }
 
 Outputs:
-- EGMP_preprocessed/<subject_id>/<basename>.npz
-  with:
-    audio_mel_lr:  (T, 2*nmels)           # log-Mel L & R
-    audio_ild:     (T, nmels)             # interaural level difference (L-R)
-    audio_ipd:     (T, nmels)             # interaural phase diff proxy (unwrap(phaseL-phaseR))
-    eeg_proc:      (T, n_eeg_feat)        # EEG features resampled to T (after re-ref + zscore + conv-lag bank)
-    gains:         (K,) or NaNs           # from YAML if available
-    panning:       (K,) or NaNs
-    pan_hist:      (3,)                   # [Left, Center, Right] histogram over stems (if panning found)
-    gain_sorted:   (K_sorted,)            # sorted gains ascending (NaNs if missing)
-    present_mask:  (4,)                   # which of {Gt,Vx,Dr,Bs} appear in filename (0/1)
-    label_idx:     ()                     # y in {0:Gt, 1:Vx, 2:Dr, 3:Bs}
-    sr_audio:      ()                     # 44100
-    hop_len:       ()                     # STFT hop used (samples)
-    nmels:         ()
-    trial_id:      (str)
-- EGMP_preprocessed/manifest.csv (one row per npz)
+  EGMP_preprocessed/<subject>/<trial_id>.npz
+    audio_mel_lr:  (4864, 2*nmels)
+    audio_ild:     (4864, nmels)
+    audio_ipd:     (4864, nmels)
+    eeg_proc:      (4864, n_eeg_feat)    # n_eeg_feat = 20 * len(LAG_MS)
+    gains:         (K,)                  # as floats from YAML
+    panning:       (K,)
+    pan_hist:      (3,)                  # [Left, Center, Right] counts
+    gain_sorted:   (K,)
+    present_mask:  (4,)                  # {Gt,Vx,Dr,Bs}
+    label_idx:     ()                    # 0:Gt, 1:Vx, 2:Dr, 3:Bs
+    sr_audio, hop_len, win_len, nmels, trial_id, genre, ensemble, spatial
 
-Notes:
-- We parse label (attended instrument) from EEG filename suffix before "_response.npy".
-  Example: "..._Dr_response.npy" => label = Dr
-- We infer instruments present from mixed-audio filename tokens containing {Gt,Vx,Dr,Bs}.
-- We align EEG to audio frame-rate by linear interpolation after temporal conv-lag features.
+Also writes EGMP_preprocessed/manifest.csv
 """
 
 import os
 import re
 import csv
-import json
 import glob
 import math
-import yaml
+import argparse
 import numpy as np
 import soundfile as sf
-from scipy.signal import butter, filtfilt
 import librosa
+import yaml
+from scipy.signal import butter, filtfilt
 
 # -----------------------------
-# Paths (edit if needed)
+# Paths (CLI overridable)
 # -----------------------------
-EEG_DIR = "/users/PAS2301/liu215229932/Music_Project/Dataset/MADEEG/processed_data/response_npy"
-AUDIO_DIR = "/users/PAS2301/liu215229932/Music_Project/Dataset/MADEEG/processed_data/stimulus_wav"
+DEF_EEG_DIR = "../../Dataset/MADEEG/processed_data/response_npy"
+DEF_AUDIO_DIR = "../../Dataset/MADEEG/processed_data/stimulus_wav"
+DEF_YAML_PATH = "../../Dataset/MADEEG/madeeg_preprocessed.yaml"
 OUT_DIR = "./EGMP_preprocessed"
 
-os.makedirs(OUT_DIR, exist_ok=True)
-
 # -----------------------------
-# Config
+# Constants / Config
 # -----------------------------
 SR_AUDIO = 44100
 EEG_SR = 256
+EEG_LEN = 4864                 # strict length per your note
 NMELS = 96
-N_FFT = 1024
-HOP = 512  # -> audio frames T ~= 837900/512 ≈ 1637.9
+HOP = 172                      # ≈ 44100 / 256
+WIN = 344                      # 2 * HOP
+N_FFT = 1024                   # was: N_FFT = WIN
+FMIN = 20.0
+FMAX = 16000.0
+
 INSTR_CODES = ["Gt", "Vx", "Dr", "Bs"]
 LABEL_TO_IDX = {"Gt": 0, "Vx": 1, "Dr": 2, "Bs": 3}
+POP_ONLY = True  # skip trials whose attended label not in {Gt,Vx,Dr,Bs}
 
 # EEG preprocessing
-BP_LO, BP_HI = 1.0, 32.0   # band-pass Hz (optional but recommended)
 USE_BANDPASS = True
-# Temporal conv-lag bank: emulate 0..250ms neural latency with a tiny filter bank via shifted copies
-LAG_MS = [0, 50, 100, 150, 200, 250]  # ms
-# For re-referencing and z-score:
+BP_LO, BP_HI = 1.0, 32.0
+LAG_MS = [0, 50, 100, 150, 200, 250]  # neural latency modeling
 EPS = 1e-8
 
 # -----------------------------
 # Helpers
 # -----------------------------
-def parse_subject_and_label(eeg_path):
-    """
-    EEG filename examples:
-      0001_pop_mixtape_trio_GtDrVx_theme2_stereo_Dr_response.npy
-    We take leading 4 digits as subject id.
-    Label = last instrument code before '_response.npy'
-    """
-    base = os.path.basename(eeg_path)
-    m = re.match(r"^(\d{4})_.*_([A-Za-z]{2})_response\.npy$", base)
-    if m:
-        sid = m.group(1)
-        label = m.group(2)
-    else:
-        # Fallback: try more permissive parse
-        sid = base.split("_")[0]
-        label = base.split("_")[-2] if base.endswith("_response.npy") else None
-    if label not in LABEL_TO_IDX:
-        raise ValueError(f"Cannot parse attended label from {base}")
-    return sid, label
-
-def find_audio_for_eeg(eeg_path):
-    """
-    We map EEG file to a mixed WAV by removing the trailing '_<Inst>_response.npy'
-    and replacing directory + extension.
-    Example:
-      EEG:  .../response_npy/0001_pop_mixtape_trio_GtDrVx_theme2_stereo_Dr_response.npy
-      WAV:  .../stimulus_wav/0001_pop_mixtape_trio_GtDrVx_theme2_stereo.wav
-    """
-    eeg_base = os.path.basename(eeg_path)
-    core = re.sub(r"_[A-Za-z]{2}_response\.npy$", "", eeg_base)
-    wav_path = os.path.join(AUDIO_DIR, core + ".wav")
-    if not os.path.exists(wav_path):
-        raise FileNotFoundError(f"Mixed WAV not found for EEG {eeg_base}: {wav_path}")
-    return wav_path, core
-
-def parse_present_instruments_from_wav(wav_base):
-    """
-    From basename tokens, detect which of {Gt,Vx,Dr,Bs} are present.
-    Example: "..._GtDrVx_..." => present Gt, Dr, Vx
-    """
-    pres = np.zeros(4, dtype=np.float32)
-    for code, idx in LABEL_TO_IDX.items():
-        if f"_{code}" in wav_base or code in wav_base.split("_"):
-            pres[idx] = 1.0
-    # Also look for bundled token like "..._GtDrVx_..."
-    for token in wav_base.split("_"):
-        for code, idx in LABEL_TO_IDX.items():
-            if code in token and len(token) <= 6:
-                pres[idx] = 1.0
-    return pres
-
-def maybe_read_yaml_sidecar(wav_path):
-    """
-    Try to read a YAML with same basename: *.yml or *.yaml
-    Returns (gains, panning, pan_hist, gain_sorted)
-    If missing, returns NaNs.
-    """
-    base = os.path.splitext(wav_path)[0]
-    yml = None
-    for ext in [".yml", ".yaml"]:
-        cand = base + ext
-        if os.path.exists(cand):
-            yml = cand
-            break
-    if yml is None:
-        K = 3  # duet/trio max; use NaNs
-        return (np.full((K,), np.nan, dtype=np.float32),
-                np.full((K,), np.nan, dtype=np.float32),
-                np.array([np.nan, np.nan, np.nan], dtype=np.float32),
-                np.full((K,), np.nan, dtype=np.float32))
-    with open(yml, "r") as f:
-        data = yaml.safe_load(f)
-
-    try:
-        gains = data.get("wav_info", {}).get("gains", [])
-        panning = data.get("wav_info", {}).get("panning", [])
-        gains = np.array([float(x) for x in gains], dtype=np.float32)
-        panning = np.array([float(x) for x in panning], dtype=np.float32)
-        # pan histogram: L (<0.33), C (0.33-0.66), R (>0.66)
-        hist = np.zeros(3, dtype=np.float32)
-        for p in panning:
-            if p < 0.33: hist[0] += 1
-            elif p > 0.66: hist[2] += 1
-            else: hist[1] += 1
-        gain_sorted = np.sort(gains)
-        return gains, panning, hist, gain_sorted
-    except Exception:
-        K = 3
-        return (np.full((K,), np.nan, dtype=np.float32),
-                np.full((K,), np.nan, dtype=np.float32),
-                np.array([np.nan, np.nan, np.nan], dtype=np.float32),
-                np.full((K,), np.nan, dtype=np.float32))
-
 def butter_bandpass(lowcut, highcut, fs, order=4):
     nyq = 0.5 * fs
     b, a = butter(order, [lowcut/nyq, highcut/nyq], btype='band')
     return b, a
 
-def eeg_preprocess(eeg_raw, per_subj_stats):
+def parse_subject_and_trialkey(eeg_path):
     """
-    eeg_raw: (20, 4864)
-    Steps:
-      1) Common-average re-reference (subtract mean across channels)
-      2) Optional band-pass 1-32 Hz
-      3) Per-subject z-score (use provided stats; if missing, per-trial fallback)
-      4) Build lag bank (0..250ms) by shifting along time (pad with edge)
-    Returns: eeg_feats: (n_lags * 20, 4864)
+    EEG filename example:
+      0001_pop_mixtape_trio_GtDrVx_theme2_stereo_Dr_response.npy
+    subject = '0001'
+    trialkey = 'pop_mixtape_trio_GtDrVx_theme2_stereo_Dr'
     """
-    x = eeg_raw.astype(np.float32)
-    # common-average re-ref
-    x = x - x.mean(axis=0, keepdims=True)
+    base = os.path.basename(eeg_path)
+    m = re.match(r"^(\d{4})_(.+)_response\.npy$", base)
+    if not m:
+        raise ValueError(f"Unexpected EEG filename: {base}")
+    sid = m.group(1)
+    trialkey = m.group(2)
+    return sid, trialkey
 
-    # band-pass
-    if USE_BANDPASS:
-        b, a = butter_bandpass(BP_LO, BP_HI, EEG_SR, order=4)
-        x = filtfilt(b, a, x, axis=1, method='gust')
-
-    # z-score (per subject)
-    if per_subj_stats is not None:
-        mean, std = per_subj_stats
-        std = np.where(std < 1e-6, 1.0, std)
-        x = (x - mean) / std
-    else:
-        # fallback per-trial
-        mu = x.mean(axis=1, keepdims=True)
-        sigma = x.std(axis=1, keepdims=True) + EPS
-        x = (x - mu) / sigma
-
-    # Lag bank (shift to the RIGHT in samples to emulate delayed brain)
-    lags = [int(ms/1000.0 * EEG_SR) for ms in LAG_MS]
-    feats = []
-    for L in lags:
-        if L == 0:
-            feats.append(x)
-        else:
-            pad = np.repeat(x[:, :1], L, axis=1)
-            shifted = np.concatenate([pad, x[:, :-L]], axis=1)
-            feats.append(shifted)
-    eeg_feats = np.concatenate(feats, axis=0)  # (20*len(lags), 4864)
-    return eeg_feats
-
-def resample_eeg_to_audio_frames(eeg_feats, T_audio):
+def wav_path_from_eeg(eeg_path, audio_dir):
     """
-    eeg_feats: (C_eeg, 4864) -> transpose time first -> (4864, C_eeg)
-    We linearly resample to T_audio frames (≈1638)
-    Returns: (T_audio, C_eeg)
+    EEG:  0001_pop_mixtape_duo_GtVx_theme2_stereo_Vx_response.npy
+    WAV:  0001_pop_mixtape_duo_GtVx_theme2_stereo_Vx_stimulus.wav
+    (keep the target instrument; just swap suffix)
     """
-    C, Teeg = eeg_feats.shape
-    t_src = np.linspace(0.0, 1.0, num=Teeg, dtype=np.float32)
-    t_dst = np.linspace(0.0, 1.0, num=T_audio, dtype=np.float32)
-    out = np.empty((T_audio, C), dtype=np.float32)
-    # vectorized linear interpolation per channel
-    for c in range(C):
-        out[:, c] = np.interp(t_dst, t_src, eeg_feats[c, :])
-    return out
+    eeg_base = os.path.basename(eeg_path)
+    core_with_target = eeg_base.replace("_response.npy", "")  # keep the ..._stereo_<Inst>
+    wav_name = core_with_target + "_stimulus.wav"
+    wav_path = os.path.join(audio_dir, wav_name)
+    return wav_path, core_with_target
 
-def audio_features(wav_stereo):
-    """
-    wav_stereo: (N, 2) float32 at 44100
-    Returns:
-      mel_lr: (T, 2*NMELS)
-      ild:    (T, NMELS)
-      ipd:    (T, NMELS)
-      T: number of frames
-    """
-    L = wav_stereo[:,0].astype(np.float32)
-    R = wav_stereo[:,1].astype(np.float32)
-
-    # STFT
-    SL = librosa.stft(L, n_fft=N_FFT, hop_length=HOP, window='hann', center=True)
-    SR = librosa.stft(R, n_fft=N_FFT, hop_length=HOP, window='hann', center=True)
-
-    # Mel filterbank
-    mel_fb = librosa.filters.mel(sr=SR_AUDIO, n_fft=N_FFT, n_mels=NMELS, fmin=20.0, fmax=sr_to_fmax(SR_AUDIO))
-    # Power spectrograms
-    PL = np.abs(SL)**2
-    PR = np.abs(SR)**2
-    # Mel energies
-    ML = np.dot(mel_fb, PL)
-    MR = np.dot(mel_fb, PR)
-    # log-mel
-    logML = np.log(ML + 1e-8).T   # (T, NMELS)
-    logMR = np.log(MR + 1e-8).T   # (T, NMELS)
-
-    # ILD (level diff, mel-bandwise)
-    ild = (logML - logMR)  # (T, NMELS)
-
-    # IPD proxy: unwrap phase difference, then project to mel bands by energy-weighted avg
-    phaseL = np.angle(SL)  # (F, T)
-    phaseR = np.angle(SR)
-    # raw IPD per linear bin
-    ipd_lin = np.unwrap(phaseL - phaseR, axis=0)  # (F, T)
-    # energy weights from (PL+PR)
-    W = (PL + PR) + 1e-8
-    # project to mel: (NMELS, F) @ (F, T) -> (NMELS, T) -> (T, NMELS)
-    ipd_mel = (mel_fb @ (ipd_lin * W) ) / (mel_fb @ W)
-    ipd = np.clip(ipd_mel.T, -np.pi, np.pi)
-
-    mel_lr = np.concatenate([logML.T, logMR.T], axis=1)  # (T, 2*NMELS)
-    T = mel_lr.shape[0]
-    return mel_lr.astype(np.float32), ild.astype(np.float32), ipd.astype(np.float32), T
-
-def sr_to_fmax(sr):
-    # conservative upper mel limit
-    return min(16000.0, 0.45*sr)
-
-# -----------------------------
-# Two-pass per-subject z-score
-# -----------------------------
 def collect_subject_stats(eeg_paths):
     """
-    First pass: compute per-subject mean/std per channel AFTER re-ref (and band-pass if enabled).
-    Returns dict sid -> (mean(20,), std(20,))
+    Per-subject channel-wise mean/std AFTER re-ref (+band-pass if enabled), for z-scoring.
+    Returns: dict[sid] -> (mean(20,), std(20,))
     """
-    stats = {}
-    acc_sum = {}
-    acc_sq = {}
-    count = {}
+    acc_sum, acc_sq, count = {}, {}, {}
     for eeg_path in eeg_paths:
-        sid, _ = parse_subject_and_label(eeg_path)
-        x = np.load(eeg_path)  # (20, 4864)
-        # re-ref & band-pass only (no z)
+        sid, _ = parse_subject_and_trialkey(eeg_path)
+        x = np.load(eeg_path)  # (20,4864)
         xr = x - x.mean(axis=0, keepdims=True)
         if USE_BANDPASS:
             b, a = butter_bandpass(BP_LO, BP_HI, EEG_SR, order=4)
             xr = filtfilt(b, a, xr, axis=1, method='gust')
-        mu = xr.mean(axis=1)     # (20,)
-        var = xr.var(axis=1)     # (20,)
+        mu = xr.mean(axis=1)  # (20,)
+        var = xr.var(axis=1)  # (20,)
         if sid not in acc_sum:
             acc_sum[sid] = mu.copy()
             acc_sq[sid]  = var + mu**2
-            count[sid] = 1
+            count[sid]   = 1
         else:
             acc_sum[sid] += mu
             acc_sq[sid]  += var + mu**2
-            count[sid] += 1
+            count[sid]   += 1
+    stats = {}
     for sid in acc_sum:
         n = count[sid]
         m = acc_sum[sid] / n
@@ -329,77 +152,274 @@ def collect_subject_stats(eeg_paths):
         stats[sid] = (m.astype(np.float32), s.astype(np.float32))
     return stats
 
+def eeg_preprocess(eeg_raw, mean_std):
+    """
+    eeg_raw: (20, 4864)
+    Steps:
+      - Common-average re-reference
+      - Optional band-pass 1-32 Hz
+      - Per-subject z-score
+      - Lag bank (0..250 ms) via time shifts (pad at start)
+    Return: eeg_feats (n_ch=20*len(LAG_MS), 4864)
+    """
+    x = eeg_raw.astype(np.float32)
+    x = x - x.mean(axis=0, keepdims=True)  # re-ref
+
+    if USE_BANDPASS:
+        b, a = butter_bandpass(BP_LO, BP_HI, EEG_SR, order=4)
+        x = filtfilt(b, a, x, axis=1, method='gust')
+
+    if mean_std is not None:
+        mu, sd = mean_std
+        sd = np.where(sd < 1e-6, 1.0, sd)
+        x = (x - mu[:, None]) / sd[:, None]
+    else:
+        mu = x.mean(axis=1, keepdims=True)
+        sd = x.std(axis=1, keepdims=True) + EPS
+        x = (x - mu) / sd
+
+    lags = [int(ms/1000.0 * EEG_SR) for ms in LAG_MS]
+    feats = []
+    for L in lags:
+        if L == 0:
+            feats.append(x)
+        else:
+            pad = np.repeat(x[:, :1], L, axis=1)
+            shifted = np.concatenate([pad, x[:, :-L]], axis=1)
+            feats.append(shifted)
+    eeg_feats = np.concatenate(feats, axis=0)  # (20*L, 4864)
+    return eeg_feats
+
+def linear_resample_time(X, T_target):
+    """
+    X: (T_src, D) or (D, T_src) -> returns same orientation with T_target along time
+    This function auto-detects whether time is axis 0 or axis 1.
+    """
+    if X.ndim != 2:
+        raise ValueError("linear_resample_time expects 2D array")
+    time_axis = 0 if X.shape[0] < X.shape[1] else 1  # heuristic; we’ll resample along the smaller axis if ambiguous
+    if time_axis == 0:
+        T_src, D = X.shape
+        if T_src == T_target:
+            return X
+        t_src = np.linspace(0.0, 1.0, T_src, dtype=np.float32)
+        t_dst = np.linspace(0.0, 1.0, T_target, dtype=np.float32)
+        Y = np.empty((T_target, D), dtype=np.float32)
+        for d in range(D):
+            Y[:, d] = np.interp(t_dst, t_src, X[:, d])
+        return Y
+    else:
+        D, T_src = X.shape
+        if T_src == T_target:
+            return X
+        t_src = np.linspace(0.0, 1.0, T_src, dtype=np.float32)
+        t_dst = np.linspace(0.0, 1.0, T_target, dtype=np.float32)
+        Y = np.empty((D, T_target), dtype=np.float32)
+        for d in range(D):
+            Y[d, :] = np.interp(t_dst, t_src, X[d, :])
+        return Y
+
+def sr_to_fmax(sr):
+    return min(FMAX, 0.45 * sr)
+
+def audio_features_aligned(wav_stereo):
+    """
+    Compute stereo log-Mel, ILD, IPD using hop=172, win=344.
+    Then strictly resample to EEG_LEN=4864 frames.
+
+    Returns:
+      mel_lr: (4864, 2*NMELS)
+      ild:    (4864, NMELS)
+      ipd:    (4864, NMELS)
+    """
+    L = wav_stereo[:, 0].astype(np.float32)
+    R = wav_stereo[:, 1].astype(np.float32)
+
+    SL = librosa.stft(L, n_fft=N_FFT, hop_length=HOP, win_length=WIN, window='hann', center=True)
+    SR = librosa.stft(R, n_fft=N_FFT, hop_length=HOP, win_length=WIN, window='hann', center=True)
+
+    PL = np.abs(SL) ** 2  # (F, T_a)
+    PR = np.abs(SR) ** 2
+
+    mel_fb = librosa.filters.mel(sr=SR_AUDIO, n_fft=N_FFT, n_mels=NMELS, fmin=FMIN, fmax=sr_to_fmax(SR_AUDIO))
+    ML = mel_fb @ PL        # (NMELS, T_a)
+    MR = mel_fb @ PR        # (NMELS, T_a)
+
+    logML = np.log(ML + 1e-8)  # (NMELS, T_a)
+    logMR = np.log(MR + 1e-8)
+
+    # ILD in mel domain
+    ild = (logML - logMR)  # (NMELS, T_a)
+
+    # IPD: mel-weighted phase difference
+    phaseL = np.angle(SL)  # (F, T_a)
+    phaseR = np.angle(SR)
+    ipd_lin = np.unwrap(phaseL - phaseR, axis=0)
+    # W = (PL + PR) + 1e-8
+    # ipd_mel = (mel_fb @ (ipd_lin * W)) / (mel_fb @ W)  # (NMELS, T_a)
+    # ipd_mel = np.clip(ipd_mel, -np.pi, np.pi)
+    W = (PL + PR) + 1e-8
+    den = (mel_fb @ W) + 1e-10           # <-- add epsilon here
+    num = (mel_fb @ (ipd_lin * W))
+    ipd_mel = num / den
+
+    # Time-axis resample to exactly 4864 frames
+    logML_T = linear_resample_time(logML.T, EEG_LEN)  # (4864, NMELS)
+    logMR_T = linear_resample_time(logMR.T, EEG_LEN)  # (4864, NMELS)
+    ild_T   = linear_resample_time(ild.T,   EEG_LEN)  # (4864, NMELS)
+    ipd_T   = linear_resample_time(ipd_mel.T, EEG_LEN)
+
+    mel_lr = np.concatenate([logML_T, logMR_T], axis=1).astype(np.float32)  # (4864, 2*NMELS)
+    return mel_lr, ild_T.astype(np.float32), ipd_T.astype(np.float32)
+
+def pan_histogram(panning_arr):
+    hist = np.zeros(3, dtype=np.float32)
+    for p in panning_arr:
+        if p < 0.33: hist[0] += 1
+        elif p > 0.66: hist[2] += 1
+        else: hist[1] += 1
+    return hist
+
 # -----------------------------
 # Main
 # -----------------------------
 def main():
-    eeg_paths = sorted(glob.glob(os.path.join(EEG_DIR, "*.npy")))
-    if not eeg_paths:
-        raise RuntimeError(f"No EEG .npy files found under {EEG_DIR}")
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--eeg_dir",   type=str, default=DEF_EEG_DIR)
+    ap.add_argument("--audio_dir", type=str, default=DEF_AUDIO_DIR)
+    ap.add_argument("--yaml_path", type=str, default=DEF_YAML_PATH)
+    ap.add_argument("--out_dir",   type=str, default=OUT_DIR)
+    args = ap.parse_args()
 
-    # First pass for per-subject stats
+    os.makedirs(args.out_dir, exist_ok=True)
+
+    # Load master YAML (subject -> trialkey -> dict)
+    if not os.path.exists(args.yaml_path):
+        raise FileNotFoundError(f"YAML not found: {args.yaml_path}")
+    with open(args.yaml_path, "r") as f:
+        meta_all = yaml.safe_load(f)
+
+    eeg_paths = sorted(glob.glob(os.path.join(args.eeg_dir, "*.npy")))
+    if not eeg_paths:
+        raise RuntimeError(f"No EEG .npy found under {args.eeg_dir}")
+
+    # Two-pass per-subject stats for z-score
     subj_stats = collect_subject_stats(eeg_paths)
 
-    manifest_path = os.path.join(OUT_DIR, "manifest.csv")
+    manifest_path = os.path.join(args.out_dir, "manifest.csv")
     with open(manifest_path, "w", newline="") as mf:
         writer = csv.writer(mf)
-        writer.writerow(["trial_id","subject","npz_path","label_idx","present_mask","has_yaml","T_frames"])
+        writer.writerow(["trial_id","subject","npz_path","label_idx","present_mask",
+                         "genre","ensemble","spatial","has_yaml","T_frames"])
+
+        kept = skipped = 0
 
         for eeg_path in eeg_paths:
-            sid, label_code = parse_subject_and_label(eeg_path)
-            label_idx = LABEL_TO_IDX[label_code]
+            base = os.path.basename(eeg_path)
+            try:
+                sid, trialkey = parse_subject_and_trialkey(eeg_path)
+                if sid not in meta_all or trialkey not in meta_all[sid]:
+                    raise KeyError(f"YAML missing entry for {sid}/{trialkey}")
+                meta = meta_all[sid][trialkey]
 
-            wav_path, core = find_audio_for_eeg(eeg_path)
-            wav_stereo, sr = sf.read(wav_path, always_2d=True)
-            if sr != SR_AUDIO:
-                raise ValueError(f"Expected {SR_AUDIO} Hz WAV, got {sr} in {wav_path}")
-            if wav_stereo.shape != (837900, 2):
-                # enforce known length/shape
-                wav_stereo = wav_stereo[:837900, :2]
+                target = meta.get("target", None)
+                if target is None:
+                    raise KeyError(f"No 'target' in YAML for {sid}/{trialkey}")
 
-            # audio features
-            mel_lr, ild, ipd, T = audio_features(wav_stereo)
+                if POP_ONLY and target not in LABEL_TO_IDX:
+                    skipped += 1
+                    continue
+                label_idx = LABEL_TO_IDX.get(target, -1)
+                if label_idx < 0:
+                    skipped += 1
+                    continue
 
-            # metadata
-            gains, panning, pan_hist, gain_sorted = maybe_read_yaml_sidecar(wav_path)
-            has_yaml = not np.isnan(gains).all()
+                instr_list = meta.get("instruments", [])
+                present_mask = np.zeros(4, dtype=np.float32)
+                for code in instr_list:
+                    if code in LABEL_TO_IDX:
+                        present_mask[LABEL_TO_IDX[code]] = 1.0
 
-            present_mask = parse_present_instruments_from_wav(os.path.basename(wav_path))
+                wi = meta.get("wav_info", {})
+                gains = np.array([float(x) for x in wi.get("gains", [])], dtype=np.float32)
+                panning = np.array([float(x) for x in wi.get("panning", [])], dtype=np.float32)
+                pan_hist = pan_histogram(panning)
+                gain_sorted = np.sort(gains) if gains.size > 0 else np.array([], dtype=np.float32)
+                has_yaml = 1
 
-            # EEG
-            eeg = np.load(eeg_path)  # (20, 4864)
-            mean_std = subj_stats.get(sid, None)
-            eeg_feats = eeg_preprocess(eeg, mean_std)        # (20*len(lags), 4864)
-            eeg_resamp = resample_eeg_to_audio_frames(eeg_feats, T)  # (T, C_eeg)
+                # WAV
+                wav_path, wav_core = wav_path_from_eeg(eeg_path, args.audio_dir)
+                if not os.path.exists(wav_path):
+                    raise FileNotFoundError(f"WAV not found: {wav_path}")
+                wav_stereo, sr = sf.read(wav_path, always_2d=True)
+                if sr != SR_AUDIO:
+                    raise ValueError(f"Expected {SR_AUDIO} Hz, got {sr} in {wav_path}")
+                if wav_stereo.shape[1] != 2:
+                    raise ValueError(f"Expected stereo WAV with 2 channels: {wav_path}")
+                # Enforce 19 s length
+                if wav_stereo.shape[0] != 837900:
+                    N = min(837900, wav_stereo.shape[0])
+                    padN = 837900 - N
+                    wav_stereo = wav_stereo[:N, :]
+                    if padN > 0:
+                        wav_stereo = np.pad(wav_stereo, ((0,padN),(0,0)), mode='constant')
 
-            # Pack features
-            trial_id = core + f"_{label_code}"
-            out_dir = os.path.join(OUT_DIR, sid)
-            os.makedirs(out_dir, exist_ok=True)
-            out_npz = os.path.join(out_dir, trial_id + ".npz")
-            np.savez_compressed(
-                out_npz,
-                audio_mel_lr=mel_lr,
-                audio_ild=ild,
-                audio_ipd=ipd,
-                eeg_proc=eeg_resamp,
-                gains=gains.astype(np.float32),
-                panning=panning.astype(np.float32),
-                pan_hist=pan_hist.astype(np.float32),
-                gain_sorted=gain_sorted.astype(np.float32),
-                present_mask=present_mask.astype(np.float32),
-                label_idx=np.int64(label_idx),
-                sr_audio=np.int64(SR_AUDIO),
-                hop_len=np.int64(HOP),
-                nmels=np.int64(NMELS),
-                trial_id=trial_id
-            )
+                # Audio features (aligned to EEG_LEN)
+                mel_lr, ild, ipd = audio_features_aligned(wav_stereo.astype(np.float32))
 
-            writer.writerow([trial_id, sid, out_npz, label_idx,
-                             ";".join([str(int(x)) for x in present_mask.tolist()]),
-                             int(has_yaml), T])
+                # EEG preprocess (no resample; already 4864 samples)
+                eeg = np.load(eeg_path).astype(np.float32)  # (20,4864)
+                mean_std = subj_stats.get(sid, None)
+                eeg_feats = eeg_preprocess(eeg, mean_std)   # (20*lags, 4864)
+                # Convert to (4864, Ceeg)
+                eeg_T = eeg_feats.T.astype(np.float32)
+
+                # Safety: if any tiny mismatch, force exact 4864
+                if eeg_T.shape[0] != EEG_LEN:
+                    eeg_T = linear_resample_time(eeg_T, EEG_LEN)
+
+                # Save
+                trial_id = wav_core  # already includes the target (…_stereo_<Inst>)
+                out_dir = os.path.join(args.out_dir, sid)
+                os.makedirs(out_dir, exist_ok=True)
+                out_npz = os.path.join(out_dir, trial_id + ".npz")
+                np.savez_compressed(
+                    out_npz,
+                    audio_mel_lr=mel_lr,
+                    audio_ild=ild,
+                    audio_ipd=ipd,
+                    eeg_proc=eeg_T,
+                    gains=gains,
+                    panning=panning,
+                    pan_hist=pan_hist,
+                    gain_sorted=gain_sorted,
+                    present_mask=present_mask,
+                    label_idx=np.int64(label_idx),
+                    sr_audio=np.int64(SR_AUDIO),
+                    hop_len=np.int64(HOP),
+                    win_len=np.int64(WIN),
+                    nmels=np.int64(NMELS),
+                    trial_id=trial_id,
+                    genre=str(meta.get("genre","")),
+                    ensemble=str(meta.get("ensemble","")),
+                    spatial=str(meta.get("spatial",""))
+                )
+
+                writer.writerow([
+                    trial_id, sid, out_npz, label_idx,
+                    ";".join(str(int(x)) for x in present_mask.tolist()),
+                    str(meta.get("genre","")), str(meta.get("ensemble","")), str(meta.get("spatial","")),
+                    has_yaml, EEG_LEN
+                ])
+                kept += 1
+
+            except Exception as e:
+                print(f"[SKIP] {base} :: {e}")
+                skipped += 1
+                continue
 
     print(f"Done. Wrote manifest to {manifest_path}")
+    print(f"Kept: {kept} | Skipped: {skipped}")
 
 if __name__ == "__main__":
     main()
