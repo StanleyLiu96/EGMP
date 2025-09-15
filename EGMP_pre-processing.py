@@ -51,7 +51,7 @@ import numpy as np
 import soundfile as sf
 import librosa
 import yaml
-from scipy.signal import butter, filtfilt
+from scipy.signal import butter, filtfilt, iirnotch
 
 # -----------------------------
 # Paths (CLI overridable)
@@ -129,6 +129,7 @@ def collect_subject_stats(eeg_paths):
         sid, _ = parse_subject_and_trialkey(eeg_path)
         x = np.load(eeg_path)  # (20,4864)
         xr = x - x.mean(axis=0, keepdims=True)
+        xr = apply_notch_filter(xr, notch_freq=50.0, fs=EEG_SR)
         if USE_BANDPASS:
             b, a = butter_bandpass(BP_LO, BP_HI, EEG_SR, order=4)
             xr = filtfilt(b, a, xr, axis=1, method='gust')
@@ -164,6 +165,7 @@ def eeg_preprocess(eeg_raw, mean_std):
     """
     x = eeg_raw.astype(np.float32)
     x = x - x.mean(axis=0, keepdims=True)  # re-ref
+    x = apply_notch_filter(x, notch_freq=50.0, fs=EEG_SR)
 
     if USE_BANDPASS:
         b, a = butter_bandpass(BP_LO, BP_HI, EEG_SR, order=4)
@@ -280,6 +282,10 @@ def pan_histogram(panning_arr):
         else: hist[1] += 1
     return hist
 
+def apply_notch_filter(eeg_data, notch_freq, fs=256.0, quality=30.0):
+    b, a = iirnotch(notch_freq, quality, fs)
+    return filtfilt(b, a, eeg_data, axis=1)
+
 # -----------------------------
 # Main
 # -----------------------------
@@ -310,7 +316,7 @@ def main():
     with open(manifest_path, "w", newline="") as mf:
         writer = csv.writer(mf)
         writer.writerow(["trial_id","subject","npz_path","label_idx","present_mask",
-                         "genre","ensemble","spatial","has_yaml","T_frames"])
+                        "has_yaml","T_frames"])
 
         kept = skipped = 0
 
@@ -400,15 +406,14 @@ def main():
                     win_len=np.int64(WIN),
                     nmels=np.int64(NMELS),
                     trial_id=trial_id,
-                    genre=str(meta.get("genre","")),
-                    ensemble=str(meta.get("ensemble","")),
-                    spatial=str(meta.get("spatial",""))
+                    # genre=str(meta.get("genre","")),
+                    # ensemble=str(meta.get("ensemble","")),
+                    # spatial=str(meta.get("spatial",""))
                 )
 
                 writer.writerow([
                     trial_id, sid, out_npz, label_idx,
                     ";".join(str(int(x)) for x in present_mask.tolist()),
-                    str(meta.get("genre","")), str(meta.get("ensemble","")), str(meta.get("spatial","")),
                     has_yaml, EEG_LEN
                 ])
                 kept += 1
