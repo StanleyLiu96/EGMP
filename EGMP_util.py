@@ -71,13 +71,16 @@ class EGMPDataset(Dataset):
         audio = np.concatenate([mel_lr, ild, ipd], axis=1).astype(np.float32)
 
         # 2) ILD + IPD only
-        # audio = np.concatenate([ild, ipd], axis=1).astype(np.float32)
+        #audio = np.concatenate([ild, ipd], axis=1).astype(np.float32)
 
         # 3) Mel + ILD
         # audio = np.concatenate([mel_lr, ild], axis=1).astype(np.float32)
 
         # 4) Mel + IPD
         # audio = np.concatenate([mel_lr, ipd], axis=1).astype(np.float32)
+
+        # 5) Mel only (remove all spatial cues ILD & IPD)
+        # audio = mel_lr.astype(np.float32)
         # ===============================
 
 
