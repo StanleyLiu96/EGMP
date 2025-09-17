@@ -1,4 +1,5 @@
-EGMP_preprocessed*
-EGMP_ckpt
 __pycache__
+EGMP_ckpt
 EGMP_ckpt_log.txt
+EGMP_ckpt_PresentAcc
+EGMP_preprocessed*
