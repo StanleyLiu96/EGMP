@@ -31,7 +31,7 @@ import os, re, csv, glob, argparse
 import numpy as np
 import soundfile as sf
 import librosa, yaml
-from scipy.signal import filtfilt, iirnotch, welch
+from scipy.signal import butter, filtfilt, iirnotch, welch
 
 # -----------------------------
 # Config
@@ -151,9 +151,12 @@ def eeg_bandpower(eeg_raw):
     # Common average reference
     eeg = eeg_raw - eeg_raw.mean(axis=0, keepdims=True)
 
-    # Notch filter at 50 Hz and 120 Hz
-    eeg = apply_notch_filter(eeg, fs=EEG_SR, f0=50.0)
-    eeg = apply_notch_filter(eeg, fs=EEG_SR, f0=120.0)
+    # Bandpass 1–70 Hz
+    b, a = butter_bandpass(1.0, 70.0, EEG_SR, order=4)
+    eeg = filtfilt(b, a, eeg, axis=1, method="gust")
+
+    # Notch at 50 Hz (if mains leakage is strong)
+    eeg = apply_notch_filter(eeg, fs=EEG_SR, f0=50.0) # Europe mains
 
     # Frame configuration (STFT-like)
     win, hop = 256, 64       # 1.0 s window, 0.25 s step
@@ -169,6 +172,25 @@ def eeg_bandpower(eeg_raw):
             # Integrate power in band, take log
             feats[:, bi, c] = np.log(np.trapz(Pxx[mask]) + EPS)
     return feats
+
+def butter_bandpass(lowcut, highcut, fs, order=4):
+    """
+    Create bandpass filter coefficients using a Butterworth filter.
+    
+    Args:
+        lowcut: low cutoff frequency (Hz)
+        highcut: high cutoff frequency (Hz)
+        fs: sampling rate (Hz)
+        order: filter order (higher = steeper roll-off)
+
+    Returns:
+        b, a: numerator/denominator filter coefficients
+    """
+    nyq = 0.5 * fs  # Nyquist frequency
+    low = lowcut / nyq
+    high = highcut / nyq
+    b, a = butter(order, [low, high], btype="band")
+    return b, a
 
 # -----------------------------
 # Main
