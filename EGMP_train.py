@@ -426,29 +426,37 @@ def train_loop(args):
         writer.add_scalar("Acc/train", tr_acc, epoch)
         writer.add_scalar("Acc/val", va_acc, epoch)
         writer.flush()
-
         # save latest checkpoint
-        torch.save({"model": model.state_dict(),
-                    "optim": optim.state_dict(),
-                    "epoch": epoch,
-                    "val_acc": va_acc,
-                    "train_acc": tr_acc},
-                   os.path.join(latest_dir, f"{epoch}.pt"))
+        torch.save({
+            "model": model.state_dict(),
+            "optim": optim.state_dict(),
+            "epoch": epoch,
+            "val_acc": va_acc,
+            "train_acc": tr_acc},
+            os.path.join(latest_dir, f"{epoch}.pt"))
+
         # keep only last
+        latest_ckpts = sorted([f for f in os.listdir(latest_dir) if f.endswith(".pt")],
+                            key=lambda x: int(x.replace(".pt","")))
         for fname in latest_ckpts[:-1]:
-            os.remove(os.path.join(latest_dir,fname))
+            os.remove(os.path.join(latest_dir, fname))
+
 
         # save best checkpoint
-        if va_acc > best_va or (va_acc==best_va and tr_acc>best_tr):
+        if va_acc > best_va or (va_acc == best_va and tr_acc > best_tr):
             best_va, best_tr = va_acc, tr_acc
-            torch.save({"model": model.state_dict(),
-                        "optim": optim.state_dict(),
-                        "epoch": epoch,
-                        "val_acc": va_acc,
-                        "train_acc": tr_acc},
-                       os.path.join(best_dir, f"{epoch}.pt"))
+            torch.save({
+                "model": model.state_dict(),
+                "optim": optim.state_dict(),
+                "epoch": epoch,
+                "val_acc": va_acc,
+                "train_acc": tr_acc},
+                os.path.join(best_dir, f"{epoch}.pt"))
+
+            best_ckpts = sorted([f for f in os.listdir(best_dir) if f.endswith(".pt")],
+                                key=lambda x: int(x.replace(".pt","")))
             for fname in best_ckpts[:-1]:
-                os.remove(os.path.join(best_dir,fname))
+                os.remove(os.path.join(best_dir, fname))
 
     print(f"Best val acc: {best_va:.3f}")
     writer.close()
