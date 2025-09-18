@@ -116,11 +116,19 @@ def audio_features_aligned(wav_stereo):
 def eeg_spectrogram(eeg_raw):
     """
     Compute full EEG spectrogram using STFT.
+
     Input:
-      eeg_raw: (20, 4864)
+      eeg_raw: (20, 4864)  → 20 channels × 19s EEG at 256 Hz
     Output:
       feats:   (73, 129, 20)
-        = time frames × frequency bins × channels
+        = 73 time frames × 129 frequency bins × 20 channels
+
+    Notes:
+      - We use 1 s window (256 samples), 0.25 s hop (64 samples).
+      - With 4864 samples: frames = 1 + (4864 - 256)/64 = 73 exactly.
+      - boundary=None, padded=False → prevents zero-padding, so
+        output is always fixed length (73,129) instead of drifting
+        to 77 frames.
     """
     chans, T = eeg_raw.shape
 
@@ -143,8 +151,15 @@ def eeg_spectrogram(eeg_raw):
 
     # Compute STFT power for each channel
     for c in range(chans):
-        f, t, Zxx = stft(eeg[c], fs=EEG_SR, nperseg=win,
-                         noverlap=win-hop, nfft=nfft)
+        f, t, Zxx = stft(
+            eeg[c],
+            fs=EEG_SR,
+            nperseg=win,
+            noverlap=win-hop,
+            nfft=nfft,
+            boundary=None,   # disables reflection padding
+            padded=False     # prevents zero-padding at the end
+            )
         Pxx = np.abs(Zxx)**2
         feats[:, :, c] = np.log(Pxx.T + EPS)  # (73,129)
 
