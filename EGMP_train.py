@@ -18,7 +18,9 @@ Pipeline:
    - Used as a soft prior (boost true classes, penalize absent ones)
 
 3. EEG encoder
-   - Encode EEG sequence with TCN (or CNN later, if enabled)
+   - Two modes, controlled by USE_EEG_CNN:
+       * False → flatten spectrogram (F*C) per frame, encode with Linear+TCN
+       * True  → keep full 2D (F,C) spectrogram, encode with CNN
    - Apply temporal attention pooling → one EEG token e_tok (B,D)
 
 4. Instrument cross-attention
@@ -135,8 +137,8 @@ class CrossAttentionQuery(nn.Module):
 class EEG2DCNNEncoder(nn.Module):
     """
     Encode EEG time × freq × channel features using 2D convolutions.
-    Assumes input shape: (B, T, F*C) where F = #freq bins, C = #channels.
-    We'll reshape into (B, 1, T, F*C) for Conv2d.
+    Assumes input shape: (B, T, F, C) where F = #freq bins, C = #channels.
+    Internally reshaped into (B, 1, T, F*C) for Conv2d.
     """
     def __init__(self, fe, d_model):
         super().__init__()
@@ -152,9 +154,9 @@ class EEG2DCNNEncoder(nn.Module):
         self.proj = nn.Linear(64, d_model)
 
     def forward(self, x):
-        # Input: (B,T,Fe). Reshape into 2D image.
-        B, T, Fe = x.shape
-        x = x.unsqueeze(1)            # (B,1,T,Fe)
+        # Input: (B,T,F,C)
+        B, T, F, C = x.shape
+        x = x.view(B, 1, T, F*C)      # (B,1,T,F*C)
         y = self.conv(x)              # (B,64,T',1)
         y = y.squeeze(-1).transpose(1,2)  # (B,T',64)
         return self.proj(y)           # (B,T',D)
@@ -167,6 +169,8 @@ class EGMPModel(nn.Module):
         """
         fa = audio feature dimension per frame
         fe = EEG feature dimension per frame
+            - If USE_EEG_CNN=False → fe = flattened size (F*C, e.g. 2580 for 129×20)
+            - If USE_EEG_CNN=True  → fe = tuple (F,C), passed as (129,20)
         """
         super().__init__()
         self.n_classes = n_classes
@@ -264,9 +268,16 @@ def train_loop(args):
                        num_workers=1, collate_fn=collate_fulltrials, pin_memory=True)
 
     # Infer feature dims from a sample
+    # - Audio: always (T_audio, Fa)
+    # - EEG:
+    #     * If USE_EEG_CNN=False → flatten (T_eeg, F*C)
+    #     * If USE_EEG_CNN=True  → keep structured (T_eeg, F, C)
     samp = ds_tr[0]
     Fa = samp["audio"].shape[1]
-    Fe = samp["eeg"].shape[1]
+    if USE_EEG_CNN:
+        Fe = samp["eeg"].shape[1:]   # (129,20)
+    else:
+        Fe = samp["eeg"].shape[1] * samp["eeg"].shape[2]  # 129*20=2580
 
     # ---- Model & Optimizer ----
     model = EGMPModel(fa=Fa, fe=Fe).to(DEVICE)
@@ -352,7 +363,12 @@ def train_loop(args):
         tr_loss = tr_acc = n_tr = 0
         for batch in dl_tr:
             audio = batch["audio"].to(DEVICE, non_blocking=True)
-            eeg   = batch["eeg"].to(DEVICE, non_blocking=True)
+            eeg = batch["eeg"].to(DEVICE, non_blocking=True)
+
+            # Flatten if not using CNN
+            if not USE_EEG_CNN:
+                B, T, F, C = eeg.shape   # (B,73,129,20)
+                eeg = eeg.reshape(B, T, F*C)  # (B,73,2580)
             y     = batch["label"].to(DEVICE, non_blocking=True)
             present = batch["present"].to(DEVICE, non_blocking=True)
 
