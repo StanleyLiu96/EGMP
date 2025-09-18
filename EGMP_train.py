@@ -369,6 +369,7 @@ def train_loop(args):
             if not USE_EEG_CNN:
                 B, T, F, C = eeg.shape   # (B,73,129,20)
                 eeg = eeg.reshape(B, T, F*C)  # (B,73,2580)
+
             y     = batch["label"].to(DEVICE, non_blocking=True)
             present = batch["present"].to(DEVICE, non_blocking=True)
 
@@ -402,6 +403,12 @@ def train_loop(args):
             for batch in dl_va:
                 audio = batch["audio"].to(DEVICE, non_blocking=True)
                 eeg   = batch["eeg"].to(DEVICE, non_blocking=True)
+
+                # Flatten if not using CNN
+                if not USE_EEG_CNN:
+                    B, T, F, C = eeg.shape   # (B,73,129,20)
+                    eeg = eeg.reshape(B, T, F*C)  # (B,73,2580)
+
                 y     = batch["label"].to(DEVICE, non_blocking=True)
                 present = batch["present"].to(DEVICE, non_blocking=True)
 

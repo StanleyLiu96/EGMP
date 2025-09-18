@@ -36,6 +36,32 @@ class EGMPDataset(Dataset):
         'label':   scalar long     attended instrument label index (0–3)
         'trial_id': str            trial identifier
     """
+    def __init__(self, manifest_path, split="train", split_seed=0,
+                 val_ratio=0.2, val_trial_ids_path=None):
+        rows = load_manifest(manifest_path)
+        self.items = []
+
+        # Option 1: use a manual list of validation trial_ids
+        if val_trial_ids_path is not None:
+            with open(val_trial_ids_path, "r") as f:
+                val_ids = set(line.strip() for line in f if line.strip())
+            for r in rows:
+                trial_id = r["trial_id"]
+                in_val_set = trial_id in val_ids
+                if (split == "val" and in_val_set) or (split == "train" and not in_val_set):
+                    self.items.append(r)
+        else:
+            # Option 2: fallback deterministic hash-based split
+            for r in rows:
+                trial_id = r["trial_id"]
+                h = (abs(hash((trial_id, split_seed))) % 1000)/1000.0
+                is_val = (h < val_ratio)
+                if (split == "train" and not is_val) or (split == "val" and is_val):
+                    self.items.append(r)
+
+    def __len__(self):
+        return len(self.items)
+
     def __getitem__(self, idx):
         r = self.items[idx]
         z = np.load(r["npz_path"])
@@ -51,7 +77,7 @@ class EGMPDataset(Dataset):
         # --------------------
         # EEG FEATURES (structured for spectrogram)
         # --------------------
-        eeg = z["eeg_spectro"].astype(np.float32)  # (73, 129, 20)
+        eeg = z["eeg_spec"].astype(np.float32)  # (73, 129, 20)
 
         # --------------------
         # LABELS
