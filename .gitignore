@@ -3,4 +3,9 @@ EGMP_ckpt
 EGMP_ckpt_log.txt
 EGMP_ckpt_PresentAcc
 EGMP_preprocessed*
+extracted_audio
+masks
+tensorboard
 TEST1111
+EGMP1C_ckpt
+checkpoints*
