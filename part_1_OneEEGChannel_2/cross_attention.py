@@ -238,38 +238,39 @@ class CrossAttentionClassifier(nn.Module):
         feats = self.cross_att(audio, eeg)     # [B, C, T]
         pooled = self.pool(feats).squeeze(-1)  # [B, C]
         logits = self.fc(pooled)               # [B, num_classes]
-        probs = torch.softmax(logits, dim=-1)  # 概率分布
-        return probs
+        # probs = torch.softmax(logits, dim=-1)  # 概率分布
+        # return logits
+        return logits
 
-def get_predicted_labels(probs: torch.Tensor):
-    """
-    根据 cross attention 输出的概率分布，返回预测的类别标签
+# def get_predicted_labels(probs: torch.Tensor):
+#     """
+#     根据 cross attention 输出的概率分布，返回预测的类别标签
 
-    参数:
-        probs: [B, 4] 张量，已经是 softmax 概率
+#     参数:
+#         probs: [B, 4] 张量，已经是 softmax 概率
 
-    返回:
-        pred_idx: [B] 张量，类别索引
-        pred_labels: [B] 列表，类别字符串
-    """
-    pred_idx = torch.argmax(probs, dim=1)  # [B]
-    pred_labels = [IDX2LABEL[i] for i in pred_idx.tolist()]
-    return pred_idx, pred_labels
+#     返回:
+#         pred_idx: [B] 张量，类别索引
+#         pred_labels: [B] 列表，类别字符串
+#     """
+#     pred_idx = torch.argmax(probs, dim=1)  # [B]
+#     pred_labels = [IDX2LABEL[i] for i in pred_idx.tolist()]
+#     return pred_idx, pred_labels
 
 
 # ============ 测试 ============
-if __name__ == "__main__":
-    B, T_a, C_a = 4, 5000, 2   # audio
-    B, T_e, C_e = 4, 5000, 20  # EEG
-    audio_feats = torch.randn(B, T_a, C_a)
-    eeg_feats   = torch.randn(B, T_e, C_e)
+# if __name__ == "__main__":
+#     B, T_a, C_a = 4, 5000, 2   # audio
+#     B, T_e, C_e = 4, 5000, 20  # EEG
+#     audio_feats = torch.randn(B, T_a, C_a)
+#     eeg_feats   = torch.randn(B, T_e, C_e)
 
-    model = CrossAttentionClassifier(audio_in_ch=2, eeg_in_ch=20, hidden_ch=64, num_classes=4)
-    out = model(audio_feats, eeg_feats)
+#     model = CrossAttentionClassifier(audio_in_ch=2, eeg_in_ch=20, hidden_ch=64, num_classes=4)
+#     out = model(audio_feats, eeg_feats)
 
-    pred_idx, pred_labels = get_predicted_labels(out)
-    print("预测类别索引:", pred_idx.tolist())
-    print("预测类别标签:", pred_labels)
+#     pred_idx, pred_labels = get_predicted_labels(out)
+#     print("预测类别索引:", pred_idx.tolist())
+#     print("预测类别标签:", pred_labels)
 
-    print(out.shape)  # [4, 4] -> 每个样本对 4 个乐器的概率
-    print(out)        # 比如 [0.1, 0.7, 0.1, 0.1] 表示预测是 "Gt"
+#     print(out.shape)  # [4, 4] -> 每个样本对 4 个乐器的概率
+#     print(out)        # 比如 [0.1, 0.7, 0.1, 0.1] 表示预测是 "Gt"

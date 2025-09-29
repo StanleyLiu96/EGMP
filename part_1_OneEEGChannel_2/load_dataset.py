@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
+load_dataset.py
 Dataset loaders for EEG, Mixed Audio, and Solo Audio.
 ------------------------------------------------------
 This file does the following:
@@ -42,19 +43,19 @@ from scipy.io import wavfile
 # User-set variables
 # =====================
 # EEG channels we want to load (out of 20 total)
-CHANNELS = ['F3']
+CHANNELS = ["F3","F1","Fz","F2","F4","C3","C1","Cz","C2","C4","CPz","P3","P1","Pz","P2","P4","POz","O1","Oz","O2"]
 
 # Instruments we are interested in
 # Anything not in this list will be skipped
 INSTRUMENTS = ["Gt", "Vx", "Dr", "Bs"]
 
 # Paths for different data types
-EEG_PATH = "/users/PAS2301/liu215229932/Music_Project/Dataset/MADEEG_normalized/response_npy"
-MIXED_AUDIO_PATH = "/users/PAS2301/liu215229932/Music_Project/Dataset/MADEEG_normalized/stimulus_wav"
-SOLO_AUDIO_PATH = "/users/PAS2301/liu215229932/Music_Project/Dataset/MADEEG_normalized/isolated_wav"
+EEG_PATH = "../../../Dataset/MADEEG_normalized/response_npy"
+MIXED_AUDIO_PATH = "../../../Dataset/MADEEG_normalized/stimulus_wav"
+SOLO_AUDIO_PATH = "../../../Dataset/MADEEG_normalized/isolated_wav"
 
 # File containing the list of validation split basenames
-VAL_SPLIT_FILE = "/users/PAS2301/liu215229932/Music_Project/Models/EGMP/val_split_filenames.txt"
+VAL_SPLIT_FILE = "../../../Models/EGMP/val_split_filenames.txt"
 
 # =====================
 # EEG channel mapping
@@ -223,26 +224,32 @@ def load_all_datasets():
 # =====================
 # Example usage
 # =====================
-# if __name__ == "__main__":
-#     EEG_train, EEG_val, mixed_audio_train, mixed_audio_val, solo_audio_train, solo_audio_val = load_all_datasets()
-#     print("-----EEG_train")
-#     for eeg_tensor, fname in EEG_train:
-#         print(fname, eeg_tensor.shape)
-#     print("-----EEG_val")
-#     for eeg_tensor, fname in EEG_val:
-#         print(fname, eeg_tensor.shape)
-#     print("-----mixed_audio_train")
-#     for eeg_tensor, fname in mixed_audio_train:
-#         print(fname, eeg_tensor.shape)
-#     print("-----mixed_audio_val")
-#     for eeg_tensor, fname in mixed_audio_val:
-#         print(fname, eeg_tensor.shape)
-#     print("-----solo_audio_train")
-#     for eeg_tensor, fname in solo_audio_train:
-#         print(fname, eeg_tensor.shape)
-#     print("-----solo_audio_val")
-#     for eeg_tensor, fname in solo_audio_val:
-#         print(fname, eeg_tensor.shape)
+if __name__ == "__main__":
+    EEG_train, EEG_val, mixed_audio_train, mixed_audio_val, solo_audio_train, solo_audio_val = load_all_datasets()
+
+    print("EEG train sample:", EEG_train[0][0].shape, EEG_train[0][1])
+    print("Mixed audio train sample:", mixed_audio_train[0][0].shape, mixed_audio_train[0][1])
+    print("Solo audio train sample:", solo_audio_train[0][0].shape, solo_audio_train[0][1])
+
+
+    # print("-----EEG_train")
+    # for eeg_tensor, fname in EEG_train:
+    #     print(fname, eeg_tensor.shape)
+    # print("-----EEG_val")
+    # for eeg_tensor, fname in EEG_val:
+    #     print(fname, eeg_tensor.shape)
+    # print("-----mixed_audio_train")
+    # for eeg_tensor, fname in mixed_audio_train:
+    #     print(fname, eeg_tensor.shape)
+    # print("-----mixed_audio_val")
+    # for eeg_tensor, fname in mixed_audio_val:
+    #     print(fname, eeg_tensor.shape)
+    # print("-----solo_audio_train")
+    # for eeg_tensor, fname in solo_audio_train:
+    #     print(fname, eeg_tensor.shape)
+    # print("-----solo_audio_val")
+    # for eeg_tensor, fname in solo_audio_val:
+    #     print(fname, eeg_tensor.shape)
 
     # print("EEG train sample:", EEG_train[0][0].shape, EEG_train[0][1])
     # print("Mixed audio train sample:", mixed_audio_train[0][0].shape, "sr:", mixed_audio_train[0][1], mixed_audio_train[0][2])

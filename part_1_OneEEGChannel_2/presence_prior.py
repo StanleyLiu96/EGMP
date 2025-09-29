@@ -7,7 +7,7 @@ presence_prior.py
 This file defines a small sub-model that predicts the *presence prior*:
 - Input  : mixed_audio_encoded tensor of shape [B, 76, 2]
            (B = batch size, 76 = fixed time steps, 2 = audio features per step)
-- Output : presence probabilities of shape [B, 4]
+- Output : presence logits of shape [B, 4]
            (4 instruments: Gt, Vx, Dr, Bs)
 
 How it works:
@@ -53,8 +53,7 @@ class PresencePrior(nn.Module):
         Input:
             mixed_audio_encoded : [B, 76, 2]
         Output:
-            pres_probs : [B, 4], each ∈ [0,1]
-            pres_mask  : [B, 4], binary mask with 0/1 after thresholding at 0.5
+            logits : [B, 4]
         """
 
         # [B, 76, 2] → [B, 76, hidden_dim]
@@ -72,13 +71,8 @@ class PresencePrior(nn.Module):
         # Final linear layer: [B, hidden_dim] → [B, 4]
         logits = self.output_layer(x)
 
-        # Sigmoid → convert logits into probabilities in [0,1]
-        pres_probs = torch.sigmoid(logits)  # [B, 4]
-
-        # Apply threshold = 0.5 to get binary mask
-        pres_mask = (pres_probs >= 0.5).long()  # [B, 4], values in {0,1}
-
-        return pres_probs, pres_mask
+        # return pres_logits
+        return logits
 
 
 # ============================
