@@ -331,6 +331,6 @@ if __name__ == "__main__":
         EEG_train, EEG_val,
         mixed_audio_train, mixed_audio_val,
         solo_audio_train, solo_audio_val,
-        n_epochs=10, batch_size=2, lr=1e-3,
+        n_epochs=200, batch_size=2, lr=1e-3,
         device="cuda" if torch.cuda.is_available() else "cpu"
     )
