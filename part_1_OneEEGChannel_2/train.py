@@ -116,9 +116,11 @@ def train_loop(
     # -------------------------
     # Setup checkpoint dirs & TensorBoard
     # -------------------------
-    channels = "_".join(CHANNELS)
-    base_dir = f"/users/PAS2301/liu215229932/Music_Project/Models/EGMP/part_1_OneEEGChannel_2/ckpt/{channels}"
-    print("!!!!!!!!!!!!!!base_dir: ",base_dir)
+    if len(CHANNELS) == 20:
+        channels = 'ALL'
+    else:
+        channels = "_".join(CHANNELS)
+    base_dir = f"./ckpt/{channels}"
     best_dir = os.path.join(base_dir, "best")
     latest_dir = os.path.join(base_dir, "latest")
     tb_dir = os.path.join(base_dir, "tensorboard")
