@@ -71,10 +71,7 @@ def build_labels(solo_files, device):
 # -------------------------
 # Train loop
 # -------------------------
-def train_loop(
-    EEG_train, EEG_val, mixed_audio_train, mixed_audio_val, solo_audio_train, solo_audio_val,
-    n_epochs=10, batch_size=4, lr=1e-3,
-    device="cuda"):
+def train_loop(EEG_train, EEG_val, mixed_audio_train, mixed_audio_val, solo_audio_train, solo_audio_val, n_epochs, batch_size, lr, device="cuda"):
 
     # Convert to PyTorch datasets
     train_dataset = list(zip(EEG_train, mixed_audio_train, solo_audio_train))
@@ -297,7 +294,7 @@ def train_loop(
         # Always save "latest" (keep only the last one)
         latest_path = os.path.join(latest_dir, f"{epoch}.pt")
         torch.save(model.state_dict(), latest_path)
-        latest_ckpts = sorted(f for f in os.listdir(latest_dir) if f.endswith(".pt"))
+        latest_ckpts = sorted([f for f in os.listdir(latest_dir) if f.endswith(".pt")], key=lambda x: int(x.replace(".pt", "")) )
         for f in latest_ckpts[:-1]:
             os.remove(os.path.join(latest_dir, f))
 
@@ -313,7 +310,7 @@ def train_loop(
             print(f"  ✅ Saved new best model at {best_path}")
 
             # Keep only the most recent best
-            best_ckpts = sorted(f for f in os.listdir(best_dir) if f.endswith(".pt"))
+            best_ckpts = sorted([f for f in os.listdir(best_dir) if f.endswith(".pt")], key=lambda x: int(x.replace(".pt", "")))
             for f in best_ckpts[:-1]:
                 os.remove(os.path.join(best_dir, f))
 
