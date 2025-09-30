@@ -300,11 +300,7 @@ def train_loop(EEG_train, EEG_val, mixed_audio_train, mixed_audio_val, solo_audi
 
         # Save "best" only if all three conditions meet:
         # (cur train_cls <= prev train_cls) and (cur val_cls <= prev val_cls) and (cur val_acc >= prev val_acc)
-        if (
-            epoch_loss_cls <= prev_train_cls_loss and
-            val_loss_cls   <= prev_val_cls_loss   and
-            val_acc        >= prev_val_acc
-        ):
+        if (val_acc >= prev_val_acc) or (val_acc == prev_val_acc and epoch_loss_cls <= prev_train_cls_loss and val_loss_cls <= prev_val_cls_loss):
             best_path = os.path.join(best_dir, f"{epoch}.pt")
             torch.save(model.state_dict(), best_path)
             print(f"  ✅ Saved new best model at {best_path}")
