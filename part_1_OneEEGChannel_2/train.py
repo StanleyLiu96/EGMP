@@ -13,6 +13,8 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.tensorboard import SummaryWriter
 from torch.utils.data import DataLoader
+import random
+import numpy as np
 
 # Our modules
 from load_dataset import load_all_datasets, INSTRUMENTS, CHANNELS
@@ -21,8 +23,19 @@ from paic_model import PAIC
 
 
 # -------------------------
-# Label extraction helper
+# Helpers
 # -------------------------
+
+def set_seed(seed=42):
+    random.seed(seed)                 # Python random
+    np.random.seed(seed)              # NumPy
+    torch.manual_seed(seed)           # PyTorch CPU
+    torch.cuda.manual_seed(seed)      # Current GPU
+    torch.cuda.manual_seed_all(seed)  # All GPUs
+
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
 def build_labels(solo_files, device):
     """
     Convert solo audio filenames into presence + attended labels.
@@ -129,8 +142,9 @@ def train_loop(EEG_train, EEG_val, mixed_audio_train, mixed_audio_val, solo_audi
     writer = SummaryWriter(log_dir=tb_dir)
 
     # Track previous "best" values
-    prev_train_cls_loss = float("inf")
-    prev_val_cls_loss = float("inf")
+    # prev_train_cls_loss = float("inf")
+    # prev_val_cls_loss = float("inf")
+    prev_train_acc = 0.0
     prev_val_acc = 0.0
 
     # -------------------------
@@ -140,7 +154,7 @@ def train_loop(EEG_train, EEG_val, mixed_audio_train, mixed_audio_val, solo_audi
         model.train()
         epoch_loss_cls = 0.0
         epoch_loss_pres = 0.0
-        epoch_acc = 0.0
+        train_acc = 0.0
         n_train = 0
 
         # Mini-batch loop
@@ -217,13 +231,13 @@ def train_loop(EEG_train, EEG_val, mixed_audio_train, mixed_audio_val, solo_audi
             B = eeg_tensors.size(0)
             epoch_loss_cls += loss_cls.item() * B
             epoch_loss_pres += loss_pres.item() * B
-            epoch_acc += acc * B
+            train_acc += acc * B
             n_train += B
 
         # Normalize
         epoch_loss_cls /= n_train
         epoch_loss_pres /= n_train
-        epoch_acc /= n_train
+        train_acc /= n_train
 
         # -------------------------
         # Validation
@@ -273,7 +287,7 @@ def train_loop(EEG_train, EEG_val, mixed_audio_train, mixed_audio_val, solo_audi
         # Epoch summary
         # -------------------------
         print(f"[Epoch {epoch:02d}] "
-              f"train_cls={epoch_loss_cls:.4f}, train_pres={epoch_loss_pres:.4f}, train_acc={epoch_acc:.3f} | "
+              f"train_cls={epoch_loss_cls:.4f}, train_pres={epoch_loss_pres:.4f}, train_acc={train_acc:.3f} | "
               f"val_cls={val_loss_cls:.4f}, val_pres={val_loss_pres:.4f}, val_acc={val_acc:.3f}")
 
         # -------------------------
@@ -281,7 +295,7 @@ def train_loop(EEG_train, EEG_val, mixed_audio_train, mixed_audio_val, solo_audi
         # -------------------------
         writer.add_scalar("train/pres_loss",  epoch_loss_pres, epoch)
         writer.add_scalar("train/cross_loss", epoch_loss_cls,  epoch)
-        writer.add_scalar("train/acc",        epoch_acc,       epoch)
+        writer.add_scalar("train/acc",        train_acc,       epoch)
         writer.add_scalar("val/pres_loss",    val_loss_pres,   epoch)
         writer.add_scalar("val/cross_loss",   val_loss_cls,    epoch)
         writer.add_scalar("val/acc",          val_acc,         epoch)
@@ -300,7 +314,7 @@ def train_loop(EEG_train, EEG_val, mixed_audio_train, mixed_audio_val, solo_audi
 
         # Save "best" only if all three conditions meet:
         # (cur train_cls <= prev train_cls) and (cur val_cls <= prev val_cls) and (cur val_acc >= prev val_acc)
-        if (val_acc > prev_val_acc) or (val_acc == prev_val_acc and epoch_loss_cls <= prev_train_cls_loss and val_loss_cls <= prev_val_cls_loss):
+        if (val_acc > prev_val_acc) or (val_acc == prev_val_acc and train_acc >= prev_train_acc):
             best_path = os.path.join(best_dir, f"{epoch}.pt")
             torch.save(model.state_dict(), best_path)
             print(f"  ✅ Saved new best model at {best_path}")
@@ -311,8 +325,9 @@ def train_loop(EEG_train, EEG_val, mixed_audio_train, mixed_audio_val, solo_audi
                 os.remove(os.path.join(best_dir, f))
 
             # Update thresholds for next comparison
-            prev_train_cls_loss = epoch_loss_cls
-            prev_val_cls_loss   = val_loss_cls
+            # prev_train_cls_loss = epoch_loss_cls
+            # prev_val_cls_loss   = val_loss_cls
+            prev_train_acc      = train_acc
             prev_val_acc        = val_acc
 
     writer.close()
@@ -320,6 +335,8 @@ def train_loop(EEG_train, EEG_val, mixed_audio_train, mixed_audio_val, solo_audi
 
 
 if __name__ == "__main__":
+    set_seed(42)  
+
     EEG_train, EEG_val, mixed_audio_train, mixed_audio_val, solo_audio_train, solo_audio_val = load_all_datasets()
 
     train_loop(
